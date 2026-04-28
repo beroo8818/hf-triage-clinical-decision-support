@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+
+hf_triage_audit_log_v1.csv
+hf_triage_audit_log_backup.csv
+hf_triage_data_v3.json
+*.db
+*.sqlite
+
+venv/
+.env
+
+~$*.xlsx
