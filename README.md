@@ -24,3 +24,10 @@ Install the required packages:
 
 ```bash
 pip install -r requirements.txt
+```
+
+Run the app:
+
+```bash
+python hf_triage_app_v35_clinical_safety_FIXED_AUDIT.py
+```
