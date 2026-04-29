@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+import requests
 from datetime import datetime, timedelta
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -26,6 +27,7 @@ except Exception:
     HAS_OPENPYXL = False
 
 APP_TITLE = "HF Triage Clinical Safety & Decision Support Assistant"
+N8N_EMERGENCY_WEBHOOK_URL = "https://beroo90.app.n8n.cloud/webhook/hf-triage-emergency-alert"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(BASE_DIR, "hf_triage_data_v3.json")
 
@@ -139,7 +141,32 @@ LOCAL_ED_ACUITY_LEVELS = [
     "Blocked - Critical data required",
 ]
 
+def send_emergency_alert_to_n8n(payload):
+    """
+    Send emergency/high-risk triage event to n8n.
+    Keep patient data anonymized.
+    """
+    if not N8N_EMERGENCY_WEBHOOK_URL:
+        return False
 
+    try:
+        response = requests.post(
+            N8N_EMERGENCY_WEBHOOK_URL,
+            json=payload,
+            timeout=8
+        )
+
+        if response.status_code in (200, 201):
+            print("Emergency alert sent to n8n successfully.")
+            return True
+
+        print(f"n8n returned status code: {response.status_code}")
+        print(response.text)
+        return False
+
+    except Exception as error:
+        print(f"n8n emergency alert failed: {error}")
+        return False
 def _yes(value):
     return str(value or "").strip().lower() == "yes"
 
@@ -1216,7 +1243,62 @@ class HFTriageApp(tb.Window):
             except Exception as backup_error:
                 messagebox.showerror("Audit Log Error", f"Could not append audit log.\n\n{error}\n\nBackup also failed:\n{backup_error}")
                 return
+        # Send emergency/high-risk alert to n8n
+        try:
+            emergency_active = bool(str(row.get("emergency_gates", "")).strip())
+            high_risk = row.get("risk_output") == "High Risk"
 
+            # Send only when the AI/CDSS result is displayed to avoid duplicate emails
+            correct_event = row.get("event_type") == "AI_RESULT_DISPLAYED"
+
+            if correct_event and (high_risk or emergency_active):
+
+                def case_value(field_name):
+                    try:
+                        return self.case_vars[field_name].get().strip()
+                    except Exception:
+                        return ""
+
+                emergency_payload = {
+                    "alert_id": f"{self.case_vars['patient_id'].get().strip()}-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                    "timestamp": row.get("timestamp"),
+                    "event_type": row.get("event_type"),
+                    "user_role": row.get("user_role"),
+
+                    # anonymized only
+                    "patient_id": row.get("patient_id"),
+
+                    "risk_output": row.get("risk_output"),
+                    "risk_score": row.get("risk_score"),
+                    "final_pathway": row.get("final_pathway"),
+                    "recommended_action": row.get("recommended_action"),
+                    "local_ed_acuity": row.get("local_ed_acuity"),
+                    "safety_lock_status": row.get("safety_lock_status"),
+                    "clinician_confirmation_status": row.get("clinician_confirmation_status"),
+                    "emergency_gates": row.get("emergency_gates"),
+
+                    "age": case_value("age"),
+                    "systolic_bp": case_value("systolic_bp"),
+                    "diastolic_bp": case_value("diastolic_bp"),
+                    "heart_rate": case_value("heart_rate"),
+                    "respiratory_rate": case_value("respiratory_rate"),
+                    "oxygen_saturation": case_value("oxygen_saturation"),
+                    "temperature": case_value("temperature"),
+                    "chest_pain": case_value("chest_pain"),
+                    "severe_dyspnea": case_value("severe_dyspnea"),
+                    "confusion": case_value("confusion"),
+                    "pulmonary_edema_signs": case_value("pulmonary_edema_signs"),
+                }
+
+                sent = send_emergency_alert_to_n8n(emergency_payload)
+
+                if sent:
+                    self.update_status("Emergency alert sent to n8n.")
+                else:
+                    self.update_status("Emergency alert detected, but n8n sending failed.")
+
+        except Exception as alert_error:
+            print(f"n8n alert integration error: {alert_error}")
         if hasattr(self, "audit_tree"):
             self.refresh_audit_tree()
         else:
@@ -3549,6 +3631,45 @@ class HFTriageApp(tb.Window):
             clinician_action=clinician_action,
             notes=alert_notes,
         )
+               # Direct n8n emergency alert after risk classification
+        try:
+            emergency_gates = evidence.get("emergency_gates", [])
+            if isinstance(emergency_gates, list):
+                emergency_gates_text = "; ".join(emergency_gates)
+            else:
+                emergency_gates_text = str(emergency_gates or "")
+
+            if evidence.get("risk_output") == "High Risk" or emergency_gates_text.strip():
+                emergency_payload = {
+                    "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    "event_type": "AI_RESULT_DISPLAYED",
+                    "user_role": self.user_role_var.get().strip() if hasattr(self, "user_role_var") else "Clinician",
+                    "patient_id": self.case_vars["patient_id"].get().strip(),
+
+                    "risk_output": evidence.get("risk_output"),
+                    "risk_score": f"{evidence.get('risk_score', '')}/100",
+                    "final_pathway": evidence.get("final_pathway"),
+                    "recommended_action": evidence.get("recommended_action"),
+                    "emergency_gates": emergency_gates_text,
+
+                    "age": self.case_vars["age"].get().strip(),
+                    "systolic_bp": self.case_vars["systolic_bp"].get().strip(),
+                    "diastolic_bp": self.case_vars["diastolic_bp"].get().strip(),
+                    "heart_rate": self.case_vars["heart_rate"].get().strip(),
+                    "respiratory_rate": self.case_vars["respiratory_rate"].get().strip(),
+                    "oxygen_saturation": self.case_vars["oxygen_saturation"].get().strip(),
+                    "temperature": self.case_vars["temperature"].get().strip(),
+                }
+
+                sent = send_emergency_alert_to_n8n(emergency_payload)
+
+                if sent:
+                    self.update_status("High-risk alert sent to n8n.")
+                else:
+                    self.update_status("High-risk detected, but n8n alert failed.")
+
+        except Exception as alert_error:
+            print(f"n8n direct alert error: {alert_error}")
         self.generate_case_summary()
     def generate_case_summary(self):
         patient_name = self.case_vars["patient_name"].get().strip() or "Unnamed patient"
