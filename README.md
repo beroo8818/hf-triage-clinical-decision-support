@@ -70,3 +70,35 @@ A simple safety test script is included:
 
 ```bash
 python test_hf_triage_safety.py
+```
+
+---
+
+## Demo Screenshots
+
+### 1. Main Application Home
+![Main Application Home](screenshots/main_app_home.png)
+
+### 2. Patient Case Entry
+![Patient Case Entry](screenshots/patient_case_entry.png)
+
+### 3. Low Risk Result
+![Low Risk Result](screenshots/low_risk_result.png)
+
+### 4. Medium Risk Result
+![Medium Risk Result](screenshots/medium_risk_result.png)
+
+### 5. High Risk / Emergency Gate Result
+![High Risk Result](screenshots/high_risk_result.png)
+
+### 6. Clinician Confirmation / Doctor Decision Import
+![Clinician Confirmation](screenshots/_clinician_confirmation.png)
+
+### 7. Case Summary and Explainability Panel
+![Case Summary and Explainability Panel](screenshots/CASE_SUMMARY_OR_EXPLAINABILITY-PANAL.png)
+
+### 8. SOAP Documentation Generator
+![SOAP Documentation Generator](screenshots/SOAP.png)
+
+### 9. Audit Log and Review Monitoring
+![Audit Log and Review Monitoring](screenshots/audit_log_or_report_SOAP.png)
