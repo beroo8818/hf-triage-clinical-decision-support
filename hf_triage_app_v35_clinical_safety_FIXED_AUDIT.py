@@ -28,6 +28,7 @@ except Exception:
 
 APP_TITLE = "HF Triage Clinical Safety & Decision Support Assistant"
 N8N_EMERGENCY_WEBHOOK_URL = "https://beroo90.app.n8n.cloud/webhook/hf-triage-emergency-alert"
+N8N_DOCTOR_DECISION_LOOKUP_URL = "https://beroo90.app.n8n.cloud/webhook/hf-get-doctor-decision"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(BASE_DIR, "hf_triage_data_v3.json")
 
@@ -1157,14 +1158,33 @@ class HFTriageApp(tb.Window):
         self.audit_kpi_vars["high_risk"].set(str(sum(1 for r in rows if r.get("risk_output") == "High Risk")))
 
     def ensure_audit_file(self):
-        if os.path.exists(AUDIT_FILE):
-            return
         try:
-            with open(AUDIT_FILE, "w", newline="", encoding="utf-8") as file:
-                writer = csv.DictWriter(file, fieldnames=AUDIT_FIELDNAMES)
-                writer.writeheader()
-        except Exception:
-            pass
+            file_needs_header = True
+
+            if os.path.exists(AUDIT_FILE) and os.path.getsize(AUDIT_FILE) > 0:
+                with open(AUDIT_FILE, "r", encoding="utf-8") as file:
+                    first_line = file.readline().strip()
+
+                expected_start = "event_id,timestamp,event_type"
+                file_needs_header = not first_line.startswith(expected_start)
+
+                if file_needs_header:
+                    backup_file = AUDIT_FILE.replace(
+                        ".csv",
+                        f"_BAD_HEADER_BACKUP_{datetime.now().strftime('%Y%m%d%H%M%S')}.csv"
+                    )
+                    os.replace(AUDIT_FILE, backup_file)
+
+            if file_needs_header:
+                with open(AUDIT_FILE, "w", newline="", encoding="utf-8") as file:
+                    writer = csv.DictWriter(file, fieldnames=AUDIT_FIELDNAMES)
+                    writer.writeheader()
+
+        except Exception as error:
+            messagebox.showerror(
+                "Audit Log Error",
+                f"Could not prepare audit log file.\n\nError:\n{error}"
+            )
 
     def load_audit_rows(self):
         self.ensure_audit_file()
@@ -1243,62 +1263,9 @@ class HFTriageApp(tb.Window):
             except Exception as backup_error:
                 messagebox.showerror("Audit Log Error", f"Could not append audit log.\n\n{error}\n\nBackup also failed:\n{backup_error}")
                 return
-        # Send emergency/high-risk alert to n8n
-        try:
-            emergency_active = bool(str(row.get("emergency_gates", "")).strip())
-            high_risk = row.get("risk_output") == "High Risk"
+        
 
-            # Send only when the AI/CDSS result is displayed to avoid duplicate emails
-            correct_event = row.get("event_type") == "AI_RESULT_DISPLAYED"
-
-            if correct_event and (high_risk or emergency_active):
-
-                def case_value(field_name):
-                    try:
-                        return self.case_vars[field_name].get().strip()
-                    except Exception:
-                        return ""
-
-                emergency_payload = {
-                    "alert_id": f"{self.case_vars['patient_id'].get().strip()}-{datetime.now().strftime('%Y%m%d%H%M%S')}",
-                    "timestamp": row.get("timestamp"),
-                    "event_type": row.get("event_type"),
-                    "user_role": row.get("user_role"),
-
-                    # anonymized only
-                    "patient_id": row.get("patient_id"),
-
-                    "risk_output": row.get("risk_output"),
-                    "risk_score": row.get("risk_score"),
-                    "final_pathway": row.get("final_pathway"),
-                    "recommended_action": row.get("recommended_action"),
-                    "local_ed_acuity": row.get("local_ed_acuity"),
-                    "safety_lock_status": row.get("safety_lock_status"),
-                    "clinician_confirmation_status": row.get("clinician_confirmation_status"),
-                    "emergency_gates": row.get("emergency_gates"),
-
-                    "age": case_value("age"),
-                    "systolic_bp": case_value("systolic_bp"),
-                    "diastolic_bp": case_value("diastolic_bp"),
-                    "heart_rate": case_value("heart_rate"),
-                    "respiratory_rate": case_value("respiratory_rate"),
-                    "oxygen_saturation": case_value("oxygen_saturation"),
-                    "temperature": case_value("temperature"),
-                    "chest_pain": case_value("chest_pain"),
-                    "severe_dyspnea": case_value("severe_dyspnea"),
-                    "confusion": case_value("confusion"),
-                    "pulmonary_edema_signs": case_value("pulmonary_edema_signs"),
-                }
-
-                sent = send_emergency_alert_to_n8n(emergency_payload)
-
-                if sent:
-                    self.update_status("Emergency alert sent to n8n.")
-                else:
-                    self.update_status("Emergency alert detected, but n8n sending failed.")
-
-        except Exception as alert_error:
-            print(f"n8n alert integration error: {alert_error}")
+                
         if hasattr(self, "audit_tree"):
             self.refresh_audit_tree()
         else:
@@ -2366,6 +2333,12 @@ class HFTriageApp(tb.Window):
         button_frame = ttk.Frame(form_frame)
         button_frame.grid(row=field_row_count + 1, column=0, columnspan=columns_per_row, sticky="ew", pady=(5, 0))
         ttk.Button(button_frame, text="Generate Risk Classification", style="Compact.TButton", command=self.suggest_risk_output).pack(side="left", padx=4)
+        ttk.Button(
+    button_frame,
+    text="Check Doctor Decision",
+    style="Compact.TButton",
+    command=self.check_doctor_decision
+).pack(side="left", padx=4, pady=4)
         ttk.Button(button_frame, text="Show Risk Criteria", style="Compact.TButton", command=self.show_risk_criteria).pack(side="left", padx=4)
         ttk.Button(button_frame, text="Generate Summary", style="Compact.TButton", command=self.generate_case_summary).pack(side="left", padx=4)
         ttk.Button(button_frame, text="Add Patient Case", style="Compact.TButton", command=self.add_case).pack(side="left", padx=4)
@@ -3639,14 +3612,26 @@ class HFTriageApp(tb.Window):
             else:
                 emergency_gates_text = str(emergency_gates or "")
 
-            if evidence.get("risk_output") == "High Risk" or emergency_gates_text.strip():
+            risk_output_text = str(evidence.get("risk_output", "")).strip()
+
+            send_to_doctor = risk_output_text in ["Low Risk", "Medium Risk", "High Risk"]
+
+            if send_to_doctor:
                 emergency_payload = {
+                    "alert_id": f"{self.case_vars['patient_id'].get().strip()}-{datetime.now().strftime('%Y%m%d%H%M%S')}",
                     "timestamp": datetime.now().isoformat(timespec="seconds"),
                     "event_type": "AI_RESULT_DISPLAYED",
-                    "user_role": self.user_role_var.get().strip() if hasattr(self, "user_role_var") else "Clinician",
+                    "user_role": self.user_role_var.get().strip() if hasattr(self, "user_role_var") else "",
+
                     "patient_id": self.case_vars["patient_id"].get().strip(),
 
                     "risk_output": evidence.get("risk_output"),
+                    "review_priority": (
+                    "urgent" if risk_output_text == "High Risk" or emergency_gates_text.strip()
+                    else "same_day_review" if risk_output_text == "Medium Risk"
+                    else "routine_review"
+                    ),
+                    "doctor_review_required": "yes",
                     "risk_score": f"{evidence.get('risk_score', '')}/100",
                     "final_pathway": evidence.get("final_pathway"),
                     "recommended_action": evidence.get("recommended_action"),
@@ -3660,17 +3645,92 @@ class HFTriageApp(tb.Window):
                     "oxygen_saturation": self.case_vars["oxygen_saturation"].get().strip(),
                     "temperature": self.case_vars["temperature"].get().strip(),
                 }
-
+                               
+                self.last_alert_id = emergency_payload.get("alert_id")
                 sent = send_emergency_alert_to_n8n(emergency_payload)
+                               
 
                 if sent:
-                    self.update_status("High-risk alert sent to n8n.")
+                    self.update_status("Doctor review request sent to n8n.")
                 else:
-                    self.update_status("High-risk detected, but n8n alert failed.")
+                    self.update_status("Doctor review request failed.")
 
         except Exception as alert_error:
             print(f"n8n direct alert error: {alert_error}")
         self.generate_case_summary()
+    def check_doctor_decision(self):
+        """
+        Fetch the doctor's final pathway decision from n8n using the latest alert_id.
+        """
+        alert_id = getattr(self, "last_alert_id", "")
+
+        if not alert_id:
+            messagebox.showwarning(
+                "No Alert ID",
+                "No emergency alert_id found yet.\n\nGenerate a High Risk alert first."
+            )
+            return
+
+        try:
+            response = requests.get(
+                N8N_DOCTOR_DECISION_LOOKUP_URL,
+                params={"alert_id": alert_id},
+                timeout=10
+            )
+            response.raise_for_status()
+            decision = response.json()
+
+        except Exception as error:
+            messagebox.showerror(
+                "Doctor Decision Error",
+                f"Could not check doctor decision from n8n.\n\nError:\n{error}"
+            )
+            return
+
+        if decision.get("status") != "found":
+            messagebox.showinfo(
+                "No Doctor Decision Yet",
+                f"No confirmed doctor decision found yet for alert_id:\n{alert_id}"
+            )
+            return
+
+        final_pathway = decision.get("final_pathway", "")
+        decision_status = decision.get("decision_status", "")
+        decision_time = decision.get("decision_time", "")
+
+        if not final_pathway:
+            messagebox.showwarning(
+                "Missing Decision",
+                "Doctor decision was found, but final_pathway is empty."
+            )
+            return
+
+        if hasattr(self, "case_vars") and "final_pathway" in self.case_vars:
+            self.case_vars["final_pathway"].set(final_pathway)
+
+        if hasattr(self, "clinician_confirmation_var"):
+            self.clinician_confirmation_var.set("Confirmed by doctor via n8n")
+
+        if hasattr(self, "final_decision_confirmed_var"):
+            self.final_decision_confirmed_var.set(True)
+
+        self.append_audit_log(
+            event_type="FINAL_DECISION_CONFIRMED",
+            clinician_action="confirmed via n8n doctor decision",
+            notes=f"Doctor decision imported from n8n. Final pathway: {final_pathway}. Decision time: {decision_time}. Status: {decision_status}",
+            document_type="doctor_decision"
+        )
+
+        if hasattr(self, "refresh_audit_tree"):
+            self.refresh_audit_tree()
+
+        self.update_status(f"Doctor decision imported: {final_pathway}")
+
+        messagebox.showinfo(
+            "Doctor Decision Imported",
+            f"Doctor decision found and applied.\n\nFinal Pathway:\n{final_pathway}\n\nStatus:\n{decision_status}"
+        )
+      
     def generate_case_summary(self):
         patient_name = self.case_vars["patient_name"].get().strip() or "Unnamed patient"
         evidence = self.build_risk_evidence()
